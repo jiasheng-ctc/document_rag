@@ -6,7 +6,7 @@ The **Llama_RAG_System** is a robust retrieval-augmented generation (RAG) system
 
 Here’s a glimpse of the Gradio app interface:
 
-![Gradio App Screenshot](https://github.com/NimaVahdat/Llama_RAG_System/screenshot.png)
+![Gradio App Screenshot](https://github.com/NimaVahdat/Llama_RAG_System/blob/main/screenshot.png)
 
 🚧 Please note: This project is currently in development. Your feedback and contributions are welcome!
 
