@@ -94,16 +94,6 @@ def generate_CHITCHAT(query: str, history: list) -> str:
 
 
 def generate_response(question: str, relevant_chunks: list, history: list) -> str:
-    """
-    Generate a response to the given question based on retrieved context and web scraping results.
-
-    Args:
-        question (str): The question to answer.
-        relevant_chunks (list): A list of relevant text chunks retrieved from documents.
-
-    Returns:
-        str: The generated answer to the question, based on the provided context and web results.
-    """
     # Combine relevant chunks into a single context
     context = "\n\n".join(relevant_chunks)
 
