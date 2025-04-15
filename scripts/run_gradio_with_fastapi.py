@@ -7,13 +7,14 @@ import uuid
 import os
 import time
 import atexit
-
 # FastAPI server URL
 FASTAPI_URL = "http://localhost:8000"  # Change this if your FastAPI server is on a different host/port
 
-# Initialize the session ID and document tracking
-SESSION_ID = str(uuid.uuid4())
 UPLOADED_PDFS = []
+
+def create_client_session_id():
+    """Create a new session ID for this specific client connection"""
+    return str(uuid.uuid4())
 
 # Get the current directory to properly reference the logo
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -148,7 +149,7 @@ button.primary {
 """
 
 # Functions remain the same
-def debug_collections():
+def debug_collections(session_id=None):
     """Debug function to check existing collections."""
     try:
         response = requests.get(f"{FASTAPI_URL}/list-collections")
@@ -156,13 +157,25 @@ def debug_collections():
             collections = response.json().get("collections", [])
             print(f"Server collections: {collections}")
             
-            # Check if our session exists
-            session_collection = f"{SESSION_ID}"
-            if collections and session_collection in collections:
-                print(f"✅ Current session collection '{session_collection}' exists on server")
-            else:
-                print(f"❌ Current session collection '{session_collection}' NOT FOUND on server")
+            if session_id:
+                # Check if this specific session exists
+                session_collection = f"{session_id}"
+                if collections and session_collection in str(collections):
+                    print(f"✅ Session collection '{session_collection}' exists on server")
+                else:
+                    print(f"❌ Session collection '{session_collection}' NOT FOUND on server")
             
+            # Try the new diagnostic endpoint for more detailed information
+            try:
+                diag_response = requests.get(f"{FASTAPI_URL}/chroma-diagnostics")
+                if diag_response.status_code == 200:
+                    diagnostics = diag_response.json()
+                    print(f"ChromaDB Diagnostics: {diagnostics}")
+                else:
+                    print(f"Failed to get diagnostics: {diag_response.status_code}")
+            except Exception as e:
+                print(f"Error getting diagnostics: {e}")
+                
             return collections
         else:
             print(f"Error response: {response.status_code} - {response.text}")
@@ -211,9 +224,9 @@ def process_pdfs(files):
     
     return files, status
 
-def handle_question_and_documents(question: str, pdf_status: str) -> tuple:
+def handle_question_and_documents(question: str, pdf_status: str, session_id: str) -> tuple:
     """Handle the user's query and process the uploaded PDFs."""
-    global SESSION_ID, UPLOADED_PDFS
+    global UPLOADED_PDFS
     
     if not question.strip():
         return [{"role": "user", "content": "Please enter a valid question."}], ""
@@ -221,28 +234,21 @@ def handle_question_and_documents(question: str, pdf_status: str) -> tuple:
     # Prepare PDF content for the API call
     pdf_contents = [pdf["content"] for pdf in UPLOADED_PDFS] if UPLOADED_PDFS else []
 
-    # Prepare the request to the FastAPI server
+    # Prepare the request to the FastAPI server using the client-specific session ID
     payload = {
         "question": question,
         "pdf_contents": pdf_contents,
-        "session_id": SESSION_ID
+        "session_id": session_id
     }
     
     try:
         # Send the request to the FastAPI server
-        print(f"Sending request to FastAPI with {len(pdf_contents)} PDFs for session {SESSION_ID}")
+        print(f"Sending request to FastAPI with {len(pdf_contents)} PDFs for session {session_id}")
         response = requests.post(f"{FASTAPI_URL}/ask", json=payload, timeout=300)
         response.raise_for_status()
         
         # Parse the response
         result = response.json()
-        
-        # IMPORTANT: Always update the session ID with what the server returned
-        if "session_id" in result:
-            server_session_id = result["session_id"]
-            if server_session_id != SESSION_ID:
-                print(f"⚠️ Updating session ID from {SESSION_ID} to server's {server_session_id}")
-                SESSION_ID = server_session_id
         
         # Return the conversation history and empty the input
         return result.get("conversation", []), ""
@@ -255,55 +261,86 @@ def handle_question_and_documents(question: str, pdf_status: str) -> tuple:
             }
         ], question
 
-def create_new_session():
-    """Create a new session."""
-    global SESSION_ID, UPLOADED_PDFS
-    old_session_id = SESSION_ID
-    SESSION_ID = str(uuid.uuid4())
+def create_new_session(current_session_id=None):
+    """Create a new session, cleaning up the previous one if it exists."""
+    global UPLOADED_PDFS
+    
+    # Clear any uploaded PDFs
     UPLOADED_PDFS = []
-
-    try:
-        payload = {
-            "session_id": old_session_id
-        }
-        
-        response = requests.delete(f"{FASTAPI_URL}/session", json=payload)
-        if response.status_code == 200:
-            print(f"Successfully deleted old session: {old_session_id}")
-    except Exception as e:
-        print(f"Error deleting old session: {e}")
+    
+    # Clean up the previous session if it exists
+    if current_session_id:
+        try:
+            print(f"Cleaning up previous session: {current_session_id}")
+            
+            # Request server to delete previous session collection
+            payload = {
+                "session_id": current_session_id
+            }
+            
+            response = requests.delete(f"{FASTAPI_URL}/documents", json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                success = result.get("success", False)
+                if success:
+                    print(f"Server successfully deleted documents for previous session: {result.get('message', '')}")
+                else:
+                    print(f"Server reported error when cleaning previous session: {result.get('error', 'Unknown error')}")
+            else:
+                print(f"Error response when cleaning previous session: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"Error requesting deletion of previous session: {e}")
+    
+    # Generate a new session ID 
+    new_session_id = create_client_session_id()
+    print(f"Created new session ID: {new_session_id}")
     
     return (
         None, 
         "No documents uploaded",  
-        [] 
+        [],
+        new_session_id
     )
 
-def clear_pdfs():
+def clear_pdfs(session_id):
     """Clear uploaded PDFs and their embeddings."""
     global UPLOADED_PDFS
     
+    if not session_id:
+        print("No session ID provided when trying to clear PDFs")
+        return None, "No documents uploaded (missing session ID)"
+    
     if not UPLOADED_PDFS:
-        print("No PDFs to clear")
+        print(f"No PDFs to clear for session {session_id}")
         return None, "No documents uploaded"
     
-
     pdf_names = [pdf["name"] for pdf in UPLOADED_PDFS]
+    print(f"Clearing {len(pdf_names)} PDFs for session {session_id}")
     UPLOADED_PDFS = []
     
     # Request server to delete all embeddings for this session
     try:
-        print(f"Requesting deletion of document embeddings for session {SESSION_ID}")
+        print(f"Requesting deletion of document embeddings for session {session_id}")
         
         payload = {
-            "session_id": SESSION_ID
+            "session_id": session_id
         }
         
-        response = requests.delete(f"{FASTAPI_URL}/documents", json=payload)
+        response = requests.delete(f"{FASTAPI_URL}/documents", json=payload, timeout=30)
         
         if response.status_code == 200:
             result = response.json()
-            print(f"Server response: {result.get('message', '')}")
+            success = result.get("success", False)
+            if success:
+                print(f"Server successfully deleted documents: {result.get('message', '')}")
+            else:
+                print(f"Server reported error: {result.get('error', 'Unknown error')}")
+                # Try to check the collections after deletion attempt
+                try:
+                    debug_collections(session_id)
+                except Exception as e:
+                    print(f"Failed to debug collections: {e}")
         else:
             print(f"Error response: {response.status_code} - {response.text}")
     except Exception as e:
@@ -311,24 +348,30 @@ def clear_pdfs():
     
     return None, "No documents uploaded"
 
-def cleanup_on_exit():
-    """Clean up on exit - delete the session."""
+def check_diagnostic_endpoint():
+    """Check if the ChromaDB diagnostic endpoint is available."""
     try:
-        payload = {
-            "session_id": SESSION_ID
-        }
-        
-        response = requests.delete(f"{FASTAPI_URL}/session", json=payload)
+        response = requests.get(f"{FASTAPI_URL}/chroma-diagnostics", timeout=5)
         if response.status_code == 200:
-            print(f"Successfully cleaned up session on exit: {SESSION_ID}")
+            print("ChromaDB diagnostic endpoint is available!")
+            return True
+        else:
+            print(f"ChromaDB diagnostic endpoint returned: {response.status_code}")
+            return False
     except Exception as e:
-        print(f"Error cleaning up on exit: {e}")
+        print(f"Error checking ChromaDB diagnostic endpoint: {e}")
+        return False
+
+def cleanup_on_exit():
+    """Clean up on exit - nothing to do since we don't track global sessions anymore."""
+    print("Application shutting down")
 
 # Register the cleanup function to run on exit
 atexit.register(cleanup_on_exit)
 
 # Create the Gradio interface - using components compatible with older Gradio versions
 with gr.Blocks(css=custom_css) as iface:
+    client_session_id = gr.State(create_client_session_id)
     if logo_base64:
         logo_html = f'<div class="logo-container"><img src="data:image/svg+xml;base64,{logo_base64}" alt="Logo" style="height:60px;"><div class="tagline">Document Intelligence</div></div>'
     else:
@@ -385,37 +428,40 @@ with gr.Blocks(css=custom_css) as iface:
         inputs=[pdf_upload],
         outputs=[pdf_upload, pdf_status]
     )
-    
-    # Set the action for the clear button
-    clear_button.click(
-        clear_pdfs,
-        inputs=[],
-        outputs=[pdf_upload, pdf_status]
-    )
-    
-    # Set the action for the new session button
-    new_session_button.click(
-        create_new_session,
-        inputs=[],
-        outputs=[pdf_upload, pdf_status, chatbot]
-    )
-    
+
     # Set the action for the submit button
     submit_button.click(
         handle_question_and_documents,
-        inputs=[question_input, pdf_status],
+        inputs=[question_input, pdf_status, client_session_id],
         outputs=[chatbot, question_input]
     )
-    
+
     # Also submit when pressing Enter in the question input
     question_input.submit(
         handle_question_and_documents,
-        inputs=[question_input, pdf_status],
+        inputs=[question_input, pdf_status, client_session_id],
         outputs=[chatbot, question_input]
+    )
+
+    # Set the action for the clear button
+    clear_button.click(
+        clear_pdfs,
+        inputs=[client_session_id],
+        outputs=[pdf_upload, pdf_status]
+    )
+
+    # Set the action for the new session button
+    new_session_button.click(
+        create_new_session,
+        inputs=[client_session_id],  # Pass current session ID for cleanup
+        outputs=[pdf_upload, pdf_status, chatbot, client_session_id]
     )
 
 # Check collections at startup
 debug_collections()
+
+print("Checking if diagnostic endpoint is available...")
+check_diagnostic_endpoint()
 
 # Launch the app
 if __name__ == "__main__":

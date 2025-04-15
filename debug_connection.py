@@ -21,6 +21,13 @@ def test_ollama_connection():
             return False
             
         logger.info(f"Successfully connected to Ollama. Available models: {[m['name'] for m in models]}")
+        
+        # Check if the required Llama 3.1 model is available
+        llama_model_found = any(m['name'].startswith('llama3.1') for m in models)
+        if not llama_model_found:
+            logger.warning("Llama 3.1 model not found. Please run: 'ollama pull llama3:70b'")
+            return False
+            
         return True
     except Exception as e:
         logger.error(f"Failed to connect to Ollama: {e}")

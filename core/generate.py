@@ -9,25 +9,17 @@ def clean_chunk_text(text):
     Clean up text chunks to improve readability for the LLM.
     This helps the model better understand the content.
     """
-    # Remove excessive whitespace (including between characters)
     text = re.sub(r'\s+', ' ', text)
-    
-    # Fix common OCR errors with dollar amounts
-    # This regex looks for patterns that might be dollar amounts with spaces
     text = re.sub(r'\$\s*(\d+)\s*\.\s*(\d+)', r'$\1.\2', text)
-    
-    # Fix common receipt formatting issues
-    text = text.replace('S G G S T', 'SG GST')  # Common receipt header issues
-    text = text.replace('G S T', 'GST')  # Tax formatting
-    
-    # Remove any lone characters that might be OCR errors (single character surrounded by spaces)
+
+    text = text.replace('S G G S T', 'SG GST')  
+    text = text.replace('G S T', 'GST') 
     text = re.sub(r'\s[bcdefghijklmnopqrstuvwxyz]\s', ' ', text, flags=re.IGNORECASE)
     
     return text.strip()
 
 def detect_task(conversation: str, query: str) -> str:
     """Detect the type of task from the conversation and query."""
-    # Limit conversation size to avoid timeout
     if len(conversation) > 1000:
         conversation = conversation[-1000:]
     
@@ -47,15 +39,12 @@ def detect_task(conversation: str, query: str) -> str:
 
 def generate_SUMMARIZATION(query: str, relevant_chunks: list, history: list) -> str:
     """Generate a summary based on relevant document chunks."""
-    # Clean each chunk first
+
     cleaned_chunks = [clean_chunk_text(chunk) for chunk in relevant_chunks]
-    
-    # Combine relevant chunks into a single context (limit size)
     context = "\n\n".join(cleaned_chunks)
     if len(context) > 1500:
         context = context[:1500] + "... [content truncated]"
 
-    # Enhanced prompt for summarization with anti-hallucination instructions
     prompt = (
         "You are a precise document summarization assistant. The user has a document that may have extraction artifacts "
         "like extra spaces between characters, especially in numbers (for example '$ 1 0 . 9 0' should be read as '$10.90'). "
@@ -68,25 +57,20 @@ def generate_SUMMARIZATION(query: str, relevant_chunks: list, history: list) -> 
         "\n\nSummary (based STRICTLY on the provided document content):"
     )
 
-    # Limit history size
     history = history[-3:] if len(history) > 3 else history.copy()
     history.append({"role": "user", "content": prompt})
 
-    # Generate response using the Ollama model
     response = ollama_chat(history)
     return response
 
 def generate_QUESTIONFROMDOC(query: str, relevant_chunks: list, history: list) -> str:
     """Answer a question based on document context with enhanced instructions for handling poorly formatted text."""
-    # Clean each chunk
+
     cleaned_chunks = [clean_chunk_text(chunk) for chunk in relevant_chunks]
-    
-    # Combine relevant chunks into a single context (limit size)
     context = "\n\n".join(cleaned_chunks)
     if len(context) > 1500:
         context = context[:1500] + "... [content truncated]"
 
-    # Enhanced prompt for document Q&A with instructions for handling PDF artifacts
     prompt = (
         "You are a precise document question-answering assistant. The user has a question about information "
         "in a PDF document. The text from this PDF may have extraction artifacts like extra spaces between characters "
@@ -99,16 +83,13 @@ def generate_QUESTIONFROMDOC(query: str, relevant_chunks: list, history: list) -
         "4. NEVER make up information not found in these documents. "
         "5. Be concise and direct in your answer. "
         "6. You do not need to tell information can be found in which document chunks. "
-        
         "\n\nQuestion: " + query + 
         "\n\nDocument content (this may contain PDF extraction artifacts like extra spaces between characters):\n" + context + 
         "\n\nAnswer (interpret any formatting issues and answer based STRICTLY on the provided content):"
     )
 
-    # Limit history size
     history = history[-3:] if len(history) > 3 else history.copy()
     history.append({"role": "user", "content": prompt})
 
-    # Generate response using the Ollama model
     response = ollama_chat(history)
     return response

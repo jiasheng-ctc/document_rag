@@ -1,5 +1,5 @@
 import os
-
+import re
 
 def load_documents_from_directory(directory_path: str):
     """
@@ -46,33 +46,24 @@ def split_text(text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> lis
         f"🔀 Splitting text into chunks of size {chunk_size} with {chunk_overlap}-character overlap."
     )
 
-    # Break on sentence boundaries when possible
-    import re
     sentences = re.split(r'(?<=[.!?])\s+', text)
     current_chunk = ""
     
     for sentence in sentences:
-        # If adding this sentence would exceed the chunk size
         if len(current_chunk) + len(sentence) > chunk_size and current_chunk:
-            # Add the current chunk to our list
             chunks.append(current_chunk)
-            # Start a new chunk with overlap
             last_period = current_chunk.rfind(".")
             if last_period != -1 and last_period > len(current_chunk) - chunk_overlap:
-                # If we can find a period in the overlap region, start from there
                 overlap_text = current_chunk[last_period+1:]
                 current_chunk = overlap_text + sentence
             else:
-                # Otherwise take the last chunk_overlap characters
                 current_chunk = current_chunk[-chunk_overlap:] + sentence
         else:
-            # Add the sentence to the current chunk
             if current_chunk:
                 current_chunk += " " + sentence
             else:
                 current_chunk = sentence
-    
-    # Don't forget the last chunk
+
     if current_chunk:
         chunks.append(current_chunk)
 

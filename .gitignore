@@ -1,0 +1,57 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.env/
+
+# VSCode settings
+.vscode/
+
+# macOS system files
+.DS_Store
+
+# Compiled python files
+*.pyc
+
+# Log files
+*.log
+
+# Local development settings
+*.local
+
+# IDE-specific files
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Temporary files
+*.tmp
+*~
+
+# Development database
+chroma_db/
+chroma_db_setup/
+
+# Screenshot and image files
+*.png
+screenshot.png
+
+# Dependencies and build files
+public/
+core/
+scripts/
+requirements.txt
+
+# GitHub-specific
+.github/
+
+# Miscellaneous
+debug_connect/
+find_all_scripts.py
+LICENSE
+README.md
+repo_structure.txt

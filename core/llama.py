@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Union
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def ollama_chat(chat_history: str, model_name: str = "phi", max_retries: int = 2, timeout: int = 120) -> str:
+def ollama_chat(chat_history: str, model_name: str = "llama3:70b", max_retries: int = 2, timeout: int = 120) -> str:
     """
     Call the Ollama model to generate a response for the given prompt with retry logic.
 
@@ -21,11 +21,10 @@ def ollama_chat(chat_history: str, model_name: str = "phi", max_retries: int = 2
     Returns:
         str: The generated response from the model, or an error message if an issue occurs.
     """
-    url = "http://localhost:11434/api/chat"  # Ollama API endpoint for chat
-    
-    # Ensure chat history isn't too long
+    url = "http://localhost:11434/api/chat"  
+
     if isinstance(chat_history, list) and len(chat_history) > 10:
-        chat_history = chat_history[-10:]  # Keep only the last 10 messages
+        chat_history = chat_history[-10:] 
     
     payload = {"model": model_name, "messages": chat_history, "stream": False}
     
@@ -42,14 +41,11 @@ def ollama_chat(chat_history: str, model_name: str = "phi", max_retries: int = 2
     while retries <= max_retries:
         try:
             logger.info(f"Sending chat request to Ollama with model: {model_name} (attempt {retries+1}/{max_retries+1})")
-            # Send POST request
             response = requests.post(url, json=payload, timeout=timeout)
-            response.raise_for_status()  # Raise an error for bad responses
+            response.raise_for_status()  
 
-            # Parse the JSON response
             json_response = response.json()
 
-            # Extract the generated message content
             generated_text = json_response.get("message", {}).get(
                 "content", "I couldn't understand. Could you explain more?"
             )
@@ -58,10 +54,9 @@ def ollama_chat(chat_history: str, model_name: str = "phi", max_retries: int = 2
         except requests.exceptions.Timeout:
             logger.warning(f"Timeout error on attempt {retries+1}/{max_retries+1}. Retrying...")
             retries += 1
-            # If this was the last retry, give up
+
             if retries > max_retries:
                 return "I'm sorry, but I'm having trouble generating a response at the moment due to system load. Please try again with a simpler question or try again later."
-            # Wait before retrying
             time.sleep(2)
             
         except requests.exceptions.RequestException as e:
@@ -75,7 +70,7 @@ def ollama_chat(chat_history: str, model_name: str = "phi", max_retries: int = 2
             logger.error(f"JSON decoding error: {e}")
             return f"An error occurred while processing the response: {str(e)}"
 
-def ollama_generate(prompt: str, model_name: str = "phi", timeout: int = 60) -> str:
+def ollama_generate(prompt: str, model_name: str = "llama3:70b", timeout: int = 60) -> str:
     """
     Call the Ollama model to generate a response for the given prompt.
 
@@ -87,9 +82,8 @@ def ollama_generate(prompt: str, model_name: str = "phi", timeout: int = 60) -> 
     Returns:
         str: The generated response from the model, or an error message if an issue occurs.
     """
-    url = "http://localhost:11434/api/generate"  # Ollama API endpoint for generate
-    
-    # Limit prompt size if it's very large
+    url = "http://localhost:11434/api/generate"  
+
     if len(prompt) > 4000:
         prompt = prompt[:4000]
         
@@ -108,25 +102,22 @@ def ollama_generate(prompt: str, model_name: str = "phi", timeout: int = 60) -> 
 
     try:
         logger.info(f"Sending generate request to Ollama with model: {model_name}")
-        # Send POST request
         response = requests.post(url, json=payload, timeout=timeout)
-        response.raise_for_status()  # Raise an error for bad responses
+        response.raise_for_status()  
 
-        # Parse the JSON response
         json_response = response.json()
 
-        # Extract the generated message content
         generated_text = json_response.get("response", "")
         return generated_text
 
     except requests.exceptions.Timeout:
         logger.error(f"Timeout error when calling Ollama generate API")
-        return "QUESTION FROM DOCUMENTS"  # Default to question answering on timeout
+        return "QUESTION FROM DOCUMENTS"  
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Error calling Ollama API: {e}")
-        return "QUESTION FROM DOCUMENTS"  # Default to question answering on error
+        return "QUESTION FROM DOCUMENTS"  
 
     except json.JSONDecodeError as e:
         logger.error(f"JSON decoding error: {e}")
-        return "QUESTION FROM DOCUMENTS"  # Default to question answering on parse error
+        return "QUESTION FROM DOCUMENTS"  

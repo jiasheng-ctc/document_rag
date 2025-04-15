@@ -264,10 +264,14 @@ async def ask(
         pdf_processed_before = False
         logger.info(f"Error checking for existing documents: {e}")
     
+    # This is the updated snippet for the PDF processing section in run_fastapi.py
+    # Find the section that processes PDFs in the /ask endpoint handler and replace it with this code:
+
     # Process PDFs if provided and not processed before
     pdf_processed = pdf_processed_before
     if question.pdf_contents and len(question.pdf_contents) > 0 and not pdf_processed_before:
         try:
+            successful_pdfs = 0
             for i, pdf_content in enumerate(question.pdf_contents):
                 try:
                     pdf_data = base64.b64decode(pdf_content)
@@ -277,6 +281,7 @@ async def ask(
                     logger.info(f"Processing PDF #{i+1} with {len(chunks)} chunks for session {session_id}")
                     
                     # Process chunks immediately
+                    added_chunks = 0
                     for j, chunk in enumerate(chunks):
                         # Clean up the chunk text before embedding
                         cleaned_chunk = clean_chunk_text(chunk)
@@ -285,27 +290,41 @@ async def ask(
                         if cleaned_chunk != chunk:
                             logger.debug(f"Cleaned chunk {j+1}:\nBefore: {chunk[:50]}...\nAfter: {cleaned_chunk[:50]}...")
                         
+                        # Generate embedding
                         embedding = ollama_embeddings(cleaned_chunk)
-                        if isinstance(embedding, list):
+                        
+                        # Critical: Check if embedding is a valid list of floats
+                        if isinstance(embedding, list) and len(embedding) > 0:
                             document_id = f"session_{session_id}_pdf{i+1}_chunk{j+1}"
-                            collection.upsert(
-                                ids=[document_id],
-                                documents=[cleaned_chunk],  # Use cleaned text
-                                embeddings=[embedding]
-                            )
+                            try:
+                                collection.upsert(
+                                    ids=[document_id],
+                                    documents=[cleaned_chunk],  # Use cleaned text
+                                    embeddings=[embedding]
+                                )
+                                added_chunks += 1
+                            except Exception as e:
+                                logger.error(f"Error upserting chunk {j+1}: {str(e)}")
+                        else:
+                            logger.error(f"Invalid embedding received for chunk {j+1}: {embedding}")
                     
-                    pdf_processed = True
+                    logger.info(f"Successfully added {added_chunks} chunks out of {len(chunks)} from PDF #{i+1}")
+                    if added_chunks > 0:
+                        successful_pdfs += 1
+                        pdf_processed = True
+                        
                 except Exception as e:
                     logger.error(f"Error processing PDF #{i+1}: {str(e)}")
             
-            if pdf_processed:
-                logger.info(f"PDF processing complete for session {session_id}")
+            if successful_pdfs > 0:
+                logger.info(f"PDF processing complete for session {session_id} - {successful_pdfs} PDFs processed successfully")
             elif not pdf_processed_before:  # Only raise error if we haven't processed PDFs before
                 raise HTTPException(status_code=400, detail="None of the PDFs could be processed successfully")
         except Exception as e:
             logger.error(f"Error processing PDFs: {str(e)}")
             raise HTTPException(status_code=400, detail=f"Error processing PDFs: {str(e)}")
-    
+
+
     # Generate response
     response = await task(question.question, collection, pdf_processed or pdf_processed_before, conversation)
     
@@ -329,24 +348,142 @@ async def delete_documents(request: DeleteDocumentsRequest):
     try:
         # Check if collection exists first
         collections = list_collections()
-        if session_id in collections:
+        
+        # Get collection names more reliably
+        collection_names = []
+        for coll in collections:
+            try:
+                if hasattr(coll, 'name'):
+                    collection_names.append(coll.name)
+                elif isinstance(coll, dict) and 'name' in coll:
+                    collection_names.append(coll['name'])
+                elif isinstance(coll, str):
+                    collection_names.append(coll)
+                else:
+                    collection_names.append(str(coll))
+            except Exception as e:
+                logger.error(f"Error extracting collection name: {e}")
+                continue
+        
+        logger.info(f"Current collections: {collection_names}")
+        
+        if session_id in collection_names:
             # Delete the collection
-            cleanup_chromadb(session_id=session_id)
+            success = cleanup_chromadb(session_id=session_id)
             
-            # Verify deletion was successful
+            # Verify deletion was successful - use improved collection name extraction
             collections_after = list_collections()
-            if session_id not in collections_after:
+            collection_names_after = []
+            for coll in collections_after:
+                try:
+                    if hasattr(coll, 'name'):
+                        collection_names_after.append(coll.name)
+                    elif isinstance(coll, dict) and 'name' in coll:
+                        collection_names_after.append(coll['name'])
+                    elif isinstance(coll, str):
+                        collection_names_after.append(coll)
+                    else:
+                        collection_names_after.append(str(coll))
+                except Exception as e:
+                    continue
+            
+            if session_id not in collection_names_after:
                 logger.info(f"Successfully deleted collection for session {session_id}")
                 return {"success": True, "message": f"Cleared all documents for session {session_id}"}
             else:
-                logger.error(f"Failed to delete collection for session {session_id}")
-                return {"success": False, "error": f"Collection still exists after deletion attempt"}
+                # Try a more forceful approach
+                logger.warning(f"First attempt to delete collection {session_id} failed, trying alternative approach")
+                try:
+                    # Try to directly access the client and delete
+                    chroma_client = chromadb.PersistentClient(path="./chroma_db")
+                    chroma_client.delete_collection(name=session_id)
+                    logger.info(f"Second attempt to delete collection {session_id} succeeded")
+                    return {"success": True, "message": f"Cleared all documents for session {session_id} (second attempt)"}
+                except Exception as e:
+                    logger.error(f"Second attempt to delete collection {session_id} failed: {e}")
+                    return {"success": False, "error": f"Collection still exists after two deletion attempts: {str(e)}"}
         else:
             logger.info(f"No collection found for session {session_id}")
             return {"success": True, "message": f"No documents found for session {session_id}"}
     except Exception as e:
         logger.error(f"Error deleting document embeddings: {e}")
         return {"success": False, "error": str(e)}
+
+@app.get("/chroma-diagnostics")
+async def chroma_diagnostics():
+    """Check the current state of ChromaDB"""
+    try:
+        # Create a ChromaDB client
+        chroma_client = chromadb.PersistentClient(path="./chroma_db")
+        
+        collections = list_collections()
+        collection_info = []
+        
+        for collection in collections:
+            try:
+                name = None
+                if hasattr(collection, 'name'):
+                    name = collection.name
+                elif isinstance(collection, dict) and 'name' in collection:
+                    name = collection['name']
+                elif isinstance(collection, str):
+                    name = collection
+                else:
+                    name = str(collection)
+                
+                # Try to get collection count
+                count = None
+                try:
+                    coll_obj = chroma_client.get_collection(name=name)
+                    count_result = coll_obj.count()
+                    count = count_result
+                except Exception as e:
+                    count = f"Error getting count: {str(e)}"
+                
+                collection_info.append({
+                    "name": name,
+                    "count": count
+                })
+            except Exception as e:
+                collection_info.append({
+                    "name": str(collection),
+                    "error": str(e)
+                })
+        
+        return {
+            "collections": collection_info,
+            "path": "./chroma_db"
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/diagnostics")
+async def diagnostics():
+    """Check system diagnostics"""
+    import os
+    
+    # Check ChromaDB directory
+    chroma_path = "./chroma_db"
+    
+    try:
+        # Check if directory exists
+        dir_exists = os.path.exists(chroma_path)
+        is_dir = os.path.isdir(chroma_path) if dir_exists else False
+        
+        # Check directory contents
+        dir_contents = os.listdir(chroma_path) if is_dir else []
+        
+        # Check collections
+        collections = list_collections()
+        
+        return {
+            "directory_exists": dir_exists,
+            "is_directory": is_dir,
+            "directory_contents": dir_contents,
+            "collections": collections
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.delete("/session")
 async def delete_session(request: DeleteSessionRequest):

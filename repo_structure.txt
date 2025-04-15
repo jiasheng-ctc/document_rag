@@ -8,6 +8,7 @@ Repository Structure and Code:
     import logging
     import shutil
     import os
+    import time
     
     # Set up logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -55,8 +56,6 @@ Repository Structure and Code:
             logger.error(f"Error setting up ChromaDB: {e}")
             raise
     
-    # Update the cleanup_chromadb function in chromadb_setup.py
-    
     def cleanup_chromadb(path: str = "./chroma_db", session_id: str = None):
         """
         Delete a session's collection or all collections.
@@ -66,53 +65,119 @@ Repository Structure and Code:
                 # Initialize a chromaDB client
                 try:
                     chroma_client = chromadb.PersistentClient(path=path)
-                    # Delete only the specific session's collection
-                    collection_name = f"{session_id}"
-                    try:
-                        # First check if the collection exists
-                        collections = chroma_client.list_collections()
-                        collection_names = [collection.name for collection in collections]
+                    
+                    # Get all collections
+                    all_collections = chroma_client.list_collections()
+                    
+                    # Extract collection names consistently
+                    collection_names = [extract_collection_name(coll) for coll in all_collections]
+                    
+                    if session_id in collection_names:
+                        logger.info(f"Found collection '{session_id}' - attempting to delete")
                         
-                        if collection_name in collection_names:
-                            chroma_client.delete_collection(name=collection_name)
-                            logger.info(f"Deleted collection '{collection_name}' for session: {session_id}")
+                        # Add a small delay to ensure any pending operations complete
+                        time.sleep(0.5)
+                        
+                        # Delete the collection
+                        chroma_client.delete_collection(name=session_id)
+                        
+                        # Verify deletion
+                        collections_after = chroma_client.list_collections()
+                        collection_names_after = [extract_collection_name(coll) for coll in collections_after]
+                        
+                        if session_id not in collection_names_after:
+                            logger.info(f"Successfully deleted collection '{session_id}'")
+                            return True
                         else:
-                            logger.warning(f"Collection '{collection_name}' not found for deletion")
-                    except Exception as e:
-                        logger.error(f"Error deleting collection {collection_name}: {e}")
+                            logger.warning(f"Collection '{session_id}' still exists after deletion attempt")
+                            return False
+                    else:
+                        logger.warning(f"Collection '{session_id}' not found for deletion")
+                        return False
+                        
                 except Exception as e:
-                    logger.error(f"Error connecting to ChromaDB: {e}")
+                    logger.error(f"Error when deleting collection {session_id}: {e}")
+                    return False
             else:
-                # On server restart, delete all collections by removing the DB directory
+                # On server restart, delete all collections
                 if os.path.exists(path):
                     try:
                         # List all collections first for logging
                         try:
                             chroma_client = chromadb.PersistentClient(path=path)
                             collections = chroma_client.list_collections()
-                            collection_names = [collection.name for collection in collections]
+                            
+                            # Extract collection names consistently
+                            collection_names = [extract_collection_name(coll) for coll in collections]
                             logger.info(f"Found collections to delete: {collection_names}")
                             
                             # Delete each collection explicitly
-                            for collection in collections:
+                            success = True
+                            for coll_name in collection_names:
                                 try:
-                                    chroma_client.delete_collection(name=collection.name)
-                                    logger.info(f"Deleted collection: {collection.name}")
+                                    # Add a small delay between deletions
+                                    time.sleep(0.5)
+                                    chroma_client.delete_collection(name=coll_name)
+                                    logger.info(f"Deleted collection: {coll_name}")
                                 except Exception as e:
-                                    logger.error(f"Error deleting collection {collection.name}: {e}")
+                                    logger.error(f"Error deleting collection {coll_name}: {e}")
+                                    success = False
+                            
+                            # Verify all collections were deleted
+                            remaining = chroma_client.list_collections()
+                            if remaining and not success:
+                                # If we couldn't delete all collections properly, try directory removal
+                                logger.warning("Some collections couldn't be deleted. Trying directory removal.")
+                                shutil.rmtree(path)
+                                logger.info(f"Deleted ChromaDB directory at {path}")
+                                # Recreate the directory
+                                os.makedirs(path, exist_ok=True)
+                            
                         except Exception as e:
                             logger.error(f"Error listing collections: {e}")
-                        
-                        # Then remove the directory as a fallback
-                        shutil.rmtree(path)
-                        logger.info(f"Deleted all ChromaDB collections at {path}")
+                            # Fall back to deleting the directory
+                            shutil.rmtree(path)
+                            logger.info(f"Deleted all ChromaDB collections at {path}")
+                            # Recreate the directory
+                            os.makedirs(path, exist_ok=True)
                     except Exception as e:
                         logger.error(f"Error removing ChromaDB directory: {e}")
-                    # Recreate the directory
-                    os.makedirs(path, exist_ok=True)
+                        return False
+                return True
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
+            return False
     
+    def extract_collection_name(collection):
+        """
+        Extract the name from a collection object in a standardized way.
+        Works with different ChromaDB versions that might return collections
+        in different formats.
+        
+        Args:
+            collection: A collection object from ChromaDB, which could be an object,
+                       dictionary, or string depending on the ChromaDB version.
+        
+        Returns:
+            str: The name of the collection, or a string representation if name cannot be extracted.
+        """
+        try:
+            # Try to access name as an attribute (newer ChromaDB versions)
+            if hasattr(collection, 'name'):
+                return collection.name
+            # Try to access name as a dictionary key
+            elif isinstance(collection, dict) and 'name' in collection:
+                return collection['name']
+            # If it's already a string, return it directly
+            elif isinstance(collection, str):
+                return collection
+            # For any other case, convert to string
+            else:
+                return str(collection)
+        except Exception:
+            # If all fails, return a safe string representation
+            return str(collection)
+            
     def list_collections(path: str = "./chroma_db"):
         """List all collections in the ChromaDB - compatible with all versions"""
         try:
@@ -123,19 +188,20 @@ Repository Structure and Code:
             collection_names = []
             for collection in collections:
                 try:
-                    collection_names.append(collection.name)
-                except AttributeError:
-                    # For older versions of ChromaDB
-                    if isinstance(collection, str):
-                        collection_names.append(collection)
+                    if hasattr(collection, 'name'):
+                        collection_names.append(collection.name)
                     else:
-                        try:
+                        # For older versions of ChromaDB
+                        if isinstance(collection, str):
+                            collection_names.append(collection)
+                        else:
                             collection_names.append(str(collection))
-                        except:
-                            pass
+                except Exception as e:
+                    logger.error(f"Error getting collection name: {e}")
+                    continue
             
             logger.info(f"Found collections: {collection_names}")
-            return collection_names
+            return collections
         except Exception as e:
             logger.error(f"Error listing collections: {e}")
             return []    [Code End]
@@ -164,6 +230,13 @@ Repository Structure and Code:
                 return False
                 
             logger.info(f"Successfully connected to Ollama. Available models: {[m['name'] for m in models]}")
+            
+            # Check if the required Llama 3.1 model is available
+            llama_model_found = any(m['name'].startswith('llama3.1') for m in models)
+            if not llama_model_found:
+                logger.warning("Llama 3.1 model not found. Please run: 'ollama pull llama3:70b'")
+                return False
+                
             return True
         except Exception as e:
             logger.error(f"Failed to connect to Ollama: {e}")
@@ -279,8 +352,26 @@ Repository Structure and Code:
         else:
             logger.error("One or more connection tests failed. Please check the logs above.")
             sys.exit(1)    [Code End]
+  [.vscode]
   [.github]
     [workflows]
+  [.git]
+    [logs]
+      [refs]
+        [remotes]
+          [origin]
+        [heads]
+    [branches]
+    [info]
+    [hooks]
+    [objects]
+      [info]
+      [pack]
+    [refs]
+      [remotes]
+        [origin]
+      [heads]
+      [tags]
   [scripts]
     - run_fastapi.py
       [Code Start]
@@ -550,10 +641,14 @@ Repository Structure and Code:
               pdf_processed_before = False
               logger.info(f"Error checking for existing documents: {e}")
           
+          # This is the updated snippet for the PDF processing section in run_fastapi.py
+          # Find the section that processes PDFs in the /ask endpoint handler and replace it with this code:
+      
           # Process PDFs if provided and not processed before
           pdf_processed = pdf_processed_before
           if question.pdf_contents and len(question.pdf_contents) > 0 and not pdf_processed_before:
               try:
+                  successful_pdfs = 0
                   for i, pdf_content in enumerate(question.pdf_contents):
                       try:
                           pdf_data = base64.b64decode(pdf_content)
@@ -563,6 +658,7 @@ Repository Structure and Code:
                           logger.info(f"Processing PDF #{i+1} with {len(chunks)} chunks for session {session_id}")
                           
                           # Process chunks immediately
+                          added_chunks = 0
                           for j, chunk in enumerate(chunks):
                               # Clean up the chunk text before embedding
                               cleaned_chunk = clean_chunk_text(chunk)
@@ -571,27 +667,41 @@ Repository Structure and Code:
                               if cleaned_chunk != chunk:
                                   logger.debug(f"Cleaned chunk {j+1}:\nBefore: {chunk[:50]}...\nAfter: {cleaned_chunk[:50]}...")
                               
+                              # Generate embedding
                               embedding = ollama_embeddings(cleaned_chunk)
-                              if isinstance(embedding, list):
+                              
+                              # Critical: Check if embedding is a valid list of floats
+                              if isinstance(embedding, list) and len(embedding) > 0:
                                   document_id = f"session_{session_id}_pdf{i+1}_chunk{j+1}"
-                                  collection.upsert(
-                                      ids=[document_id],
-                                      documents=[cleaned_chunk],  # Use cleaned text
-                                      embeddings=[embedding]
-                                  )
+                                  try:
+                                      collection.upsert(
+                                          ids=[document_id],
+                                          documents=[cleaned_chunk],  # Use cleaned text
+                                          embeddings=[embedding]
+                                      )
+                                      added_chunks += 1
+                                  except Exception as e:
+                                      logger.error(f"Error upserting chunk {j+1}: {str(e)}")
+                              else:
+                                  logger.error(f"Invalid embedding received for chunk {j+1}: {embedding}")
                           
-                          pdf_processed = True
+                          logger.info(f"Successfully added {added_chunks} chunks out of {len(chunks)} from PDF #{i+1}")
+                          if added_chunks > 0:
+                              successful_pdfs += 1
+                              pdf_processed = True
+                              
                       except Exception as e:
                           logger.error(f"Error processing PDF #{i+1}: {str(e)}")
                   
-                  if pdf_processed:
-                      logger.info(f"PDF processing complete for session {session_id}")
+                  if successful_pdfs > 0:
+                      logger.info(f"PDF processing complete for session {session_id} - {successful_pdfs} PDFs processed successfully")
                   elif not pdf_processed_before:  # Only raise error if we haven't processed PDFs before
                       raise HTTPException(status_code=400, detail="None of the PDFs could be processed successfully")
               except Exception as e:
                   logger.error(f"Error processing PDFs: {str(e)}")
                   raise HTTPException(status_code=400, detail=f"Error processing PDFs: {str(e)}")
-          
+      
+      
           # Generate response
           response = await task(question.question, collection, pdf_processed or pdf_processed_before, conversation)
           
@@ -615,24 +725,142 @@ Repository Structure and Code:
           try:
               # Check if collection exists first
               collections = list_collections()
-              if session_id in collections:
+              
+              # Get collection names more reliably
+              collection_names = []
+              for coll in collections:
+                  try:
+                      if hasattr(coll, 'name'):
+                          collection_names.append(coll.name)
+                      elif isinstance(coll, dict) and 'name' in coll:
+                          collection_names.append(coll['name'])
+                      elif isinstance(coll, str):
+                          collection_names.append(coll)
+                      else:
+                          collection_names.append(str(coll))
+                  except Exception as e:
+                      logger.error(f"Error extracting collection name: {e}")
+                      continue
+              
+              logger.info(f"Current collections: {collection_names}")
+              
+              if session_id in collection_names:
                   # Delete the collection
-                  cleanup_chromadb(session_id=session_id)
+                  success = cleanup_chromadb(session_id=session_id)
                   
-                  # Verify deletion was successful
+                  # Verify deletion was successful - use improved collection name extraction
                   collections_after = list_collections()
-                  if session_id not in collections_after:
+                  collection_names_after = []
+                  for coll in collections_after:
+                      try:
+                          if hasattr(coll, 'name'):
+                              collection_names_after.append(coll.name)
+                          elif isinstance(coll, dict) and 'name' in coll:
+                              collection_names_after.append(coll['name'])
+                          elif isinstance(coll, str):
+                              collection_names_after.append(coll)
+                          else:
+                              collection_names_after.append(str(coll))
+                      except Exception as e:
+                          continue
+                  
+                  if session_id not in collection_names_after:
                       logger.info(f"Successfully deleted collection for session {session_id}")
                       return {"success": True, "message": f"Cleared all documents for session {session_id}"}
                   else:
-                      logger.error(f"Failed to delete collection for session {session_id}")
-                      return {"success": False, "error": f"Collection still exists after deletion attempt"}
+                      # Try a more forceful approach
+                      logger.warning(f"First attempt to delete collection {session_id} failed, trying alternative approach")
+                      try:
+                          # Try to directly access the client and delete
+                          chroma_client = chromadb.PersistentClient(path="./chroma_db")
+                          chroma_client.delete_collection(name=session_id)
+                          logger.info(f"Second attempt to delete collection {session_id} succeeded")
+                          return {"success": True, "message": f"Cleared all documents for session {session_id} (second attempt)"}
+                      except Exception as e:
+                          logger.error(f"Second attempt to delete collection {session_id} failed: {e}")
+                          return {"success": False, "error": f"Collection still exists after two deletion attempts: {str(e)}"}
               else:
                   logger.info(f"No collection found for session {session_id}")
                   return {"success": True, "message": f"No documents found for session {session_id}"}
           except Exception as e:
               logger.error(f"Error deleting document embeddings: {e}")
               return {"success": False, "error": str(e)}
+      
+      @app.get("/chroma-diagnostics")
+      async def chroma_diagnostics():
+          """Check the current state of ChromaDB"""
+          try:
+              # Create a ChromaDB client
+              chroma_client = chromadb.PersistentClient(path="./chroma_db")
+              
+              collections = list_collections()
+              collection_info = []
+              
+              for collection in collections:
+                  try:
+                      name = None
+                      if hasattr(collection, 'name'):
+                          name = collection.name
+                      elif isinstance(collection, dict) and 'name' in collection:
+                          name = collection['name']
+                      elif isinstance(collection, str):
+                          name = collection
+                      else:
+                          name = str(collection)
+                      
+                      # Try to get collection count
+                      count = None
+                      try:
+                          coll_obj = chroma_client.get_collection(name=name)
+                          count_result = coll_obj.count()
+                          count = count_result
+                      except Exception as e:
+                          count = f"Error getting count: {str(e)}"
+                      
+                      collection_info.append({
+                          "name": name,
+                          "count": count
+                      })
+                  except Exception as e:
+                      collection_info.append({
+                          "name": str(collection),
+                          "error": str(e)
+                      })
+              
+              return {
+                  "collections": collection_info,
+                  "path": "./chroma_db"
+              }
+          except Exception as e:
+              return {"error": str(e)}
+      
+      @app.get("/diagnostics")
+      async def diagnostics():
+          """Check system diagnostics"""
+          import os
+          
+          # Check ChromaDB directory
+          chroma_path = "./chroma_db"
+          
+          try:
+              # Check if directory exists
+              dir_exists = os.path.exists(chroma_path)
+              is_dir = os.path.isdir(chroma_path) if dir_exists else False
+              
+              # Check directory contents
+              dir_contents = os.listdir(chroma_path) if is_dir else []
+              
+              # Check collections
+              collections = list_collections()
+              
+              return {
+                  "directory_exists": dir_exists,
+                  "is_directory": is_dir,
+                  "directory_contents": dir_contents,
+                  "collections": collections
+              }
+          except Exception as e:
+              return {"error": str(e)}
       
       @app.delete("/session")
       async def delete_session(request: DeleteSessionRequest):
@@ -689,13 +917,14 @@ Repository Structure and Code:
       import os
       import time
       import atexit
-      
       # FastAPI server URL
       FASTAPI_URL = "http://localhost:8000"  # Change this if your FastAPI server is on a different host/port
       
-      # Initialize the session ID and document tracking
-      SESSION_ID = str(uuid.uuid4())
       UPLOADED_PDFS = []
+      
+      def create_client_session_id():
+          """Create a new session ID for this specific client connection"""
+          return str(uuid.uuid4())
       
       # Get the current directory to properly reference the logo
       current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -830,7 +1059,7 @@ Repository Structure and Code:
       """
       
       # Functions remain the same
-      def debug_collections():
+      def debug_collections(session_id=None):
           """Debug function to check existing collections."""
           try:
               response = requests.get(f"{FASTAPI_URL}/list-collections")
@@ -838,13 +1067,25 @@ Repository Structure and Code:
                   collections = response.json().get("collections", [])
                   print(f"Server collections: {collections}")
                   
-                  # Check if our session exists
-                  session_collection = f"{SESSION_ID}"
-                  if collections and session_collection in collections:
-                      print(f"✅ Current session collection '{session_collection}' exists on server")
-                  else:
-                      print(f"❌ Current session collection '{session_collection}' NOT FOUND on server")
+                  if session_id:
+                      # Check if this specific session exists
+                      session_collection = f"{session_id}"
+                      if collections and session_collection in str(collections):
+                          print(f"✅ Session collection '{session_collection}' exists on server")
+                      else:
+                          print(f"❌ Session collection '{session_collection}' NOT FOUND on server")
                   
+                  # Try the new diagnostic endpoint for more detailed information
+                  try:
+                      diag_response = requests.get(f"{FASTAPI_URL}/chroma-diagnostics")
+                      if diag_response.status_code == 200:
+                          diagnostics = diag_response.json()
+                          print(f"ChromaDB Diagnostics: {diagnostics}")
+                      else:
+                          print(f"Failed to get diagnostics: {diag_response.status_code}")
+                  except Exception as e:
+                      print(f"Error getting diagnostics: {e}")
+                      
                   return collections
               else:
                   print(f"Error response: {response.status_code} - {response.text}")
@@ -893,9 +1134,9 @@ Repository Structure and Code:
           
           return files, status
       
-      def handle_question_and_documents(question: str, pdf_status: str) -> tuple:
+      def handle_question_and_documents(question: str, pdf_status: str, session_id: str) -> tuple:
           """Handle the user's query and process the uploaded PDFs."""
-          global SESSION_ID, UPLOADED_PDFS
+          global UPLOADED_PDFS
           
           if not question.strip():
               return [{"role": "user", "content": "Please enter a valid question."}], ""
@@ -903,28 +1144,21 @@ Repository Structure and Code:
           # Prepare PDF content for the API call
           pdf_contents = [pdf["content"] for pdf in UPLOADED_PDFS] if UPLOADED_PDFS else []
       
-          # Prepare the request to the FastAPI server
+          # Prepare the request to the FastAPI server using the client-specific session ID
           payload = {
               "question": question,
               "pdf_contents": pdf_contents,
-              "session_id": SESSION_ID
+              "session_id": session_id
           }
           
           try:
               # Send the request to the FastAPI server
-              print(f"Sending request to FastAPI with {len(pdf_contents)} PDFs for session {SESSION_ID}")
+              print(f"Sending request to FastAPI with {len(pdf_contents)} PDFs for session {session_id}")
               response = requests.post(f"{FASTAPI_URL}/ask", json=payload, timeout=300)
               response.raise_for_status()
               
               # Parse the response
               result = response.json()
-              
-              # IMPORTANT: Always update the session ID with what the server returned
-              if "session_id" in result:
-                  server_session_id = result["session_id"]
-                  if server_session_id != SESSION_ID:
-                      print(f"⚠️ Updating session ID from {SESSION_ID} to server's {server_session_id}")
-                      SESSION_ID = server_session_id
               
               # Return the conversation history and empty the input
               return result.get("conversation", []), ""
@@ -937,55 +1171,86 @@ Repository Structure and Code:
                   }
               ], question
       
-      def create_new_session():
-          """Create a new session."""
-          global SESSION_ID, UPLOADED_PDFS
-          old_session_id = SESSION_ID
-          SESSION_ID = str(uuid.uuid4())
+      def create_new_session(current_session_id=None):
+          """Create a new session, cleaning up the previous one if it exists."""
+          global UPLOADED_PDFS
+          
+          # Clear any uploaded PDFs
           UPLOADED_PDFS = []
-      
-          try:
-              payload = {
-                  "session_id": old_session_id
-              }
-              
-              response = requests.delete(f"{FASTAPI_URL}/session", json=payload)
-              if response.status_code == 200:
-                  print(f"Successfully deleted old session: {old_session_id}")
-          except Exception as e:
-              print(f"Error deleting old session: {e}")
+          
+          # Clean up the previous session if it exists
+          if current_session_id:
+              try:
+                  print(f"Cleaning up previous session: {current_session_id}")
+                  
+                  # Request server to delete previous session collection
+                  payload = {
+                      "session_id": current_session_id
+                  }
+                  
+                  response = requests.delete(f"{FASTAPI_URL}/documents", json=payload, timeout=30)
+                  
+                  if response.status_code == 200:
+                      result = response.json()
+                      success = result.get("success", False)
+                      if success:
+                          print(f"Server successfully deleted documents for previous session: {result.get('message', '')}")
+                      else:
+                          print(f"Server reported error when cleaning previous session: {result.get('error', 'Unknown error')}")
+                  else:
+                      print(f"Error response when cleaning previous session: {response.status_code} - {response.text}")
+              except Exception as e:
+                  print(f"Error requesting deletion of previous session: {e}")
+          
+          # Generate a new session ID 
+          new_session_id = create_client_session_id()
+          print(f"Created new session ID: {new_session_id}")
           
           return (
               None, 
               "No documents uploaded",  
-              [] 
+              [],
+              new_session_id
           )
       
-      def clear_pdfs():
+      def clear_pdfs(session_id):
           """Clear uploaded PDFs and their embeddings."""
           global UPLOADED_PDFS
           
+          if not session_id:
+              print("No session ID provided when trying to clear PDFs")
+              return None, "No documents uploaded (missing session ID)"
+          
           if not UPLOADED_PDFS:
-              print("No PDFs to clear")
+              print(f"No PDFs to clear for session {session_id}")
               return None, "No documents uploaded"
           
-      
           pdf_names = [pdf["name"] for pdf in UPLOADED_PDFS]
+          print(f"Clearing {len(pdf_names)} PDFs for session {session_id}")
           UPLOADED_PDFS = []
           
           # Request server to delete all embeddings for this session
           try:
-              print(f"Requesting deletion of document embeddings for session {SESSION_ID}")
+              print(f"Requesting deletion of document embeddings for session {session_id}")
               
               payload = {
-                  "session_id": SESSION_ID
+                  "session_id": session_id
               }
               
-              response = requests.delete(f"{FASTAPI_URL}/documents", json=payload)
+              response = requests.delete(f"{FASTAPI_URL}/documents", json=payload, timeout=30)
               
               if response.status_code == 200:
                   result = response.json()
-                  print(f"Server response: {result.get('message', '')}")
+                  success = result.get("success", False)
+                  if success:
+                      print(f"Server successfully deleted documents: {result.get('message', '')}")
+                  else:
+                      print(f"Server reported error: {result.get('error', 'Unknown error')}")
+                      # Try to check the collections after deletion attempt
+                      try:
+                          debug_collections(session_id)
+                      except Exception as e:
+                          print(f"Failed to debug collections: {e}")
               else:
                   print(f"Error response: {response.status_code} - {response.text}")
           except Exception as e:
@@ -993,24 +1258,30 @@ Repository Structure and Code:
           
           return None, "No documents uploaded"
       
-      def cleanup_on_exit():
-          """Clean up on exit - delete the session."""
+      def check_diagnostic_endpoint():
+          """Check if the ChromaDB diagnostic endpoint is available."""
           try:
-              payload = {
-                  "session_id": SESSION_ID
-              }
-              
-              response = requests.delete(f"{FASTAPI_URL}/session", json=payload)
+              response = requests.get(f"{FASTAPI_URL}/chroma-diagnostics", timeout=5)
               if response.status_code == 200:
-                  print(f"Successfully cleaned up session on exit: {SESSION_ID}")
+                  print("ChromaDB diagnostic endpoint is available!")
+                  return True
+              else:
+                  print(f"ChromaDB diagnostic endpoint returned: {response.status_code}")
+                  return False
           except Exception as e:
-              print(f"Error cleaning up on exit: {e}")
+              print(f"Error checking ChromaDB diagnostic endpoint: {e}")
+              return False
+      
+      def cleanup_on_exit():
+          """Clean up on exit - nothing to do since we don't track global sessions anymore."""
+          print("Application shutting down")
       
       # Register the cleanup function to run on exit
       atexit.register(cleanup_on_exit)
       
       # Create the Gradio interface - using components compatible with older Gradio versions
       with gr.Blocks(css=custom_css) as iface:
+          client_session_id = gr.State(create_client_session_id)
           if logo_base64:
               logo_html = f'<div class="logo-container"><img src="data:image/svg+xml;base64,{logo_base64}" alt="Logo" style="height:60px;"><div class="tagline">Document Intelligence</div></div>'
           else:
@@ -1067,41 +1338,69 @@ Repository Structure and Code:
               inputs=[pdf_upload],
               outputs=[pdf_upload, pdf_status]
           )
-          
-          # Set the action for the clear button
-          clear_button.click(
-              clear_pdfs,
-              inputs=[],
-              outputs=[pdf_upload, pdf_status]
-          )
-          
-          # Set the action for the new session button
-          new_session_button.click(
-              create_new_session,
-              inputs=[],
-              outputs=[pdf_upload, pdf_status, chatbot]
-          )
-          
+      
           # Set the action for the submit button
           submit_button.click(
               handle_question_and_documents,
-              inputs=[question_input, pdf_status],
+              inputs=[question_input, pdf_status, client_session_id],
               outputs=[chatbot, question_input]
           )
-          
+      
           # Also submit when pressing Enter in the question input
           question_input.submit(
               handle_question_and_documents,
-              inputs=[question_input, pdf_status],
+              inputs=[question_input, pdf_status, client_session_id],
               outputs=[chatbot, question_input]
+          )
+      
+          # Set the action for the clear button
+          clear_button.click(
+              clear_pdfs,
+              inputs=[client_session_id],
+              outputs=[pdf_upload, pdf_status]
+          )
+      
+          # Set the action for the new session button
+          new_session_button.click(
+              create_new_session,
+              inputs=[client_session_id],  # Pass current session ID for cleanup
+              outputs=[pdf_upload, pdf_status, chatbot, client_session_id]
           )
       
       # Check collections at startup
       debug_collections()
       
+      print("Checking if diagnostic endpoint is available...")
+      check_diagnostic_endpoint()
+      
       # Launch the app
       if __name__ == "__main__":
           iface.launch()      [Code End]
+  [chroma_db]
+    [a7709378-b8fc-4ad3-9672-ec20ea5daef3]
+    [c41c75e3-4e83-4b43-b032-0020c5d8bca7]
+    [39500c97-796b-460a-82e0-b2a4ed9e7437]
+    [e699d35c-5e3e-405b-befd-4f60d13776fa]
+    [262f5068-6cb8-499f-a937-4fabd8b0798b]
+    [3b46f229-16af-432e-89f1-d631cea69b90]
+    [0464185c-28df-451a-a22f-d29512cd955c]
+    [513f8530-2880-4a88-83a3-2ac1f8692c8c]
+    [c882b8a0-d161-439a-8ca4-060e4f51c556]
+    [2b5effc0-bb7c-4e61-b725-76a8cf8bca4d]
+    [710963a0-a4be-4cda-b7c9-d355bef6532c]
+    [b61f04d3-1bd6-4476-9e7a-c973d4aeaf94]
+    [1cbea16b-6b23-4c49-a803-c45699766cd0]
+    [6f6fd623-e2cf-41bf-8379-8578cc3021f2]
+    [393aee56-cebc-495d-a4c3-259a096e29dd]
+    [9cba5d12-2e4b-4299-a4ec-c3e70ed4d92a]
+    [02525500-ff65-4796-9101-d2a9998d5417]
+    [d0daed31-b71b-45bb-9964-7bc9494c6580]
+    [f1e9c39e-6ddf-466c-b439-7b19abe85ce8]
+    [a119cd8e-07df-4430-826c-99b607d04830]
+    [f804bb86-7029-40c4-a7d9-92bc77a1977c]
+    [702cc30c-9951-42ee-83ad-899f7bcf0690]
+    [24b3ade1-1e91-4cfc-ab9d-b0a1d9b6bac7]
+    [e7e0b21a-17c6-407f-9ce4-9bcd85819fde]
   [public]
   [core]
     - document_utils.py
@@ -1186,256 +1485,6 @@ Repository Structure and Code:
       
           print(f"✅ Text split into {len(chunks)} chunks with improved boundary handling.")
           return chunks      [Code End]
-    - llama.py
-      [Code Start]
-      import requests
-      import json
-      import logging
-      import time
-      from typing import List, Dict, Any, Union
-      
-      # Set up logging
-      logging.basicConfig(level=logging.INFO)
-      logger = logging.getLogger(__name__)
-      
-      def ollama_chat(chat_history: str, model_name: str = "phi", max_retries: int = 2, timeout: int = 120) -> str:
-          """
-          Call the Ollama model to generate a response for the given prompt with retry logic.
-      
-          Args:
-              chat_history: The history of chat between user and assistant.
-              model_name: The name of the Ollama model to use.
-              max_retries: Maximum number of retry attempts.
-              timeout: Timeout for the API call in seconds.
-      
-          Returns:
-              str: The generated response from the model, or an error message if an issue occurs.
-          """
-          url = "http://localhost:11434/api/chat"  # Ollama API endpoint for chat
-          
-          # Ensure chat history isn't too long
-          if isinstance(chat_history, list) and len(chat_history) > 10:
-              chat_history = chat_history[-10:]  # Keep only the last 10 messages
-          
-          payload = {"model": model_name, "messages": chat_history, "stream": False}
-          
-          # Add some model parameters to potentially speed up response
-          payload["options"] = {
-              "temperature": 0.1,       # Reduced from 0.7 to 0.1 for more deterministic outputs
-              "top_p": 0.5,             # Reduced from 0.9 to 0.5 to restrict token sampling
-              "num_predict": 512,       # Increased to allow for complete answers
-              "top_k": 10,              # Added to restrict to only the most likely tokens
-              "repeat_penalty": 1.2     # Added to discourage repetition which can indicate confabulation
-          }
-      
-          retries = 0
-          while retries <= max_retries:
-              try:
-                  logger.info(f"Sending chat request to Ollama with model: {model_name} (attempt {retries+1}/{max_retries+1})")
-                  # Send POST request
-                  response = requests.post(url, json=payload, timeout=timeout)
-                  response.raise_for_status()  # Raise an error for bad responses
-      
-                  # Parse the JSON response
-                  json_response = response.json()
-      
-                  # Extract the generated message content
-                  generated_text = json_response.get("message", {}).get(
-                      "content", "I couldn't understand. Could you explain more?"
-                  )
-                  return generated_text
-      
-              except requests.exceptions.Timeout:
-                  logger.warning(f"Timeout error on attempt {retries+1}/{max_retries+1}. Retrying...")
-                  retries += 1
-                  # If this was the last retry, give up
-                  if retries > max_retries:
-                      return "I'm sorry, but I'm having trouble generating a response at the moment due to system load. Please try again with a simpler question or try again later."
-                  # Wait before retrying
-                  time.sleep(2)
-                  
-              except requests.exceptions.RequestException as e:
-                  logger.error(f"Error calling Ollama API: {e}")
-                  retries += 1
-                  if retries > max_retries:
-                      return f"An error occurred while generating the response: {str(e)}"
-                  time.sleep(2)
-      
-              except json.JSONDecodeError as e:
-                  logger.error(f"JSON decoding error: {e}")
-                  return f"An error occurred while processing the response: {str(e)}"
-      
-      def ollama_generate(prompt: str, model_name: str = "phi", timeout: int = 60) -> str:
-          """
-          Call the Ollama model to generate a response for the given prompt.
-      
-          Args:
-              prompt (str): The input prompt from the user.
-              model_name: The name of the Ollama model to use.
-              timeout: Timeout for the API call in seconds.
-      
-          Returns:
-              str: The generated response from the model, or an error message if an issue occurs.
-          """
-          url = "http://localhost:11434/api/generate"  # Ollama API endpoint for generate
-          
-          # Limit prompt size if it's very large
-          if len(prompt) > 4000:
-              prompt = prompt[:4000]
-              
-          payload = {
-              "model": model_name, 
-              "prompt": prompt, 
-              "stream": False,
-              "options": {
-                  "temperature": 0.1,       # Reduced from 0.7 to match chat parameters
-                  "top_p": 0.5,             # Reduced to match chat parameters
-                  "top_k": 10,              # Added to restrict token selection
-                  "num_predict": 64,        # Task detection doesn't need many tokens
-                  "repeat_penalty": 1.2     # Added to discourage repetition
-              }
-          }
-      
-          try:
-              logger.info(f"Sending generate request to Ollama with model: {model_name}")
-              # Send POST request
-              response = requests.post(url, json=payload, timeout=timeout)
-              response.raise_for_status()  # Raise an error for bad responses
-      
-              # Parse the JSON response
-              json_response = response.json()
-      
-              # Extract the generated message content
-              generated_text = json_response.get("response", "")
-              return generated_text
-      
-          except requests.exceptions.Timeout:
-              logger.error(f"Timeout error when calling Ollama generate API")
-              return "QUESTION FROM DOCUMENTS"  # Default to question answering on timeout
-      
-          except requests.exceptions.RequestException as e:
-              logger.error(f"Error calling Ollama API: {e}")
-              return "QUESTION FROM DOCUMENTS"  # Default to question answering on error
-      
-          except json.JSONDecodeError as e:
-              logger.error(f"JSON decoding error: {e}")
-              return "QUESTION FROM DOCUMENTS"  # Default to question answering on parse error      [Code End]
-    - generate.py
-      [Code Start]
-      from core.llama import ollama_chat, ollama_generate
-      import logging
-      import re
-      
-      logger = logging.getLogger(__name__)
-      
-      def clean_chunk_text(text):
-          """
-          Clean up text chunks to improve readability for the LLM.
-          This helps the model better understand the content.
-          """
-          # Remove excessive whitespace (including between characters)
-          text = re.sub(r'\s+', ' ', text)
-          
-          # Fix common OCR errors with dollar amounts
-          # This regex looks for patterns that might be dollar amounts with spaces
-          text = re.sub(r'\$\s*(\d+)\s*\.\s*(\d+)', r'$\1.\2', text)
-          
-          # Fix common receipt formatting issues
-          text = text.replace('S G G S T', 'SG GST')  # Common receipt header issues
-          text = text.replace('G S T', 'GST')  # Tax formatting
-          
-          # Remove any lone characters that might be OCR errors (single character surrounded by spaces)
-          text = re.sub(r'\s[bcdefghijklmnopqrstuvwxyz]\s', ' ', text, flags=re.IGNORECASE)
-          
-          return text.strip()
-      
-      def detect_task(conversation: str, query: str) -> str:
-          """Detect the type of task from the conversation and query."""
-          # Limit conversation size to avoid timeout
-          if len(conversation) > 1000:
-              conversation = conversation[-1000:]
-          
-          prompt = (
-              "You are an AI assistant tasked with analyzing the following conversation between a user and an assistant. "
-              "Your goal is to determine if the user is asking for a SUMMARIZATION of a document or asking a QUESTION FROM DOCUMENTS. "
-              "Choose one of these two categories that best describes the user's request: "
-              "'SUMMARIZATION' or 'QUESTION FROM DOCUMENTS'."
-              "\n\nHere is the conversation:\n\n" + conversation + "\n\n"
-              "User's final message: " + query + "\n\n"
-              "Respond only with the category name: either 'SUMMARIZATION' or 'QUESTION FROM DOCUMENTS'."
-          )
-      
-          category = ollama_generate(prompt)
-          logger.info(f"Detected task category: {category}")
-          return category
-      
-      def generate_SUMMARIZATION(query: str, relevant_chunks: list, history: list) -> str:
-          """Generate a summary based on relevant document chunks."""
-          # Clean each chunk first
-          cleaned_chunks = [clean_chunk_text(chunk) for chunk in relevant_chunks]
-          
-          # Combine relevant chunks into a single context (limit size)
-          context = "\n\n".join(cleaned_chunks)
-          if len(context) > 1500:
-              context = context[:1500] + "... [content truncated]"
-      
-          # Enhanced prompt for summarization with anti-hallucination instructions
-          prompt = (
-              "You are a precise document summarization assistant. The user has a document that may have extraction artifacts "
-              "like extra spaces between characters, especially in numbers (for example '$ 1 0 . 9 0' should be read as '$10.90'). "
-              "Your task is to summarize ONLY the information provided in the document chunks below. "
-              "Do NOT include any information that is not explicitly present in the document chunks. "
-              "If the document chunks do not contain information related to the user's request, state this clearly. "
-              "Never make up or infer information that isn't directly stated in the documents."
-              "\n\nUser's request: " + query + 
-              "\n\nDocument content to summarize (ONLY use this information):\n" + context + 
-              "\n\nSummary (based STRICTLY on the provided document content):"
-          )
-      
-          # Limit history size
-          history = history[-3:] if len(history) > 3 else history.copy()
-          history.append({"role": "user", "content": prompt})
-      
-          # Generate response using the Ollama model
-          response = ollama_chat(history)
-          return response
-      
-      def generate_QUESTIONFROMDOC(query: str, relevant_chunks: list, history: list) -> str:
-          """Answer a question based on document context with enhanced instructions for handling poorly formatted text."""
-          # Clean each chunk
-          cleaned_chunks = [clean_chunk_text(chunk) for chunk in relevant_chunks]
-          
-          # Combine relevant chunks into a single context (limit size)
-          context = "\n\n".join(cleaned_chunks)
-          if len(context) > 1500:
-              context = context[:1500] + "... [content truncated]"
-      
-          # Enhanced prompt for document Q&A with instructions for handling PDF artifacts
-          prompt = (
-              "You are a precise document question-answering assistant. The user has a question about information "
-              "in a PDF document. The text from this PDF may have extraction artifacts like extra spaces between characters "
-              "or unusual formatting. Your task is to answer the user's question using ONLY the information "
-              "provided in the document chunks below. Follow these rules: "
-              
-              "1. If the text contains oddly spaced characters like '$ 1 0 . 9 0', interpret this as the properly formatted value '$10.90'. "
-              "2. Fix any obvious formatting issues when interpreting the content. "
-              "3. If the answer is not contained in the documents, explicitly state: 'I cannot find this information in the provided documents.' "
-              "4. NEVER make up information not found in these documents. "
-              "5. Be concise and direct in your answer. "
-              "6. You do not need to tell information can be found in which document chunks. "
-              
-              "\n\nQuestion: " + query + 
-              "\n\nDocument content (this may contain PDF extraction artifacts like extra spaces between characters):\n" + context + 
-              "\n\nAnswer (interpret any formatting issues and answer based STRICTLY on the provided content):"
-          )
-      
-          # Limit history size
-          history = history[-3:] if len(history) > 3 else history.copy()
-          history.append({"role": "user", "content": prompt})
-      
-          # Generate response using the Ollama model
-          response = ollama_chat(history)
-          return response      [Code End]
     - embedding.py
       [Code Start]
       import requests
@@ -1450,13 +1499,13 @@ Repository Structure and Code:
       logger = logging.getLogger(__name__)
       
       # Define the default embedding dimension for LLaMA models
-      # LLaMA 3's embedding dimension is 4096, but we'll check this dynamically
+      # LLaMA 3.1's embedding dimension is 4096
       DEFAULT_EMBEDDING_DIM = 4096
       
-      # Update in ollama_embeddings function
-      def ollama_embeddings(prompt: str, max_retries: int = 3, timeout: int = 300) -> Union[List[float], str]:
+      def ollama_embeddings(prompt: str, max_retries: int = 3, timeout: int = 300) -> Union[List[float], List[float]]:
           """
           Call the Ollama model to generate embeddings for the given prompt.
+          Always returns a valid embedding (empty list in case of errors).
       
           Args:
               prompt (str): The input prompt for embedding generation.
@@ -1464,12 +1513,17 @@ Repository Structure and Code:
               timeout (int, optional): Timeout for the API request in seconds. Default is 300.
       
           Returns:
-              Union[List[float], str]: The embedding as a list of floats, or an error message if an issue occurs.
+              List[float]: The embedding as a list of floats. Returns an empty list in case of failure.
           """
           url = "http://localhost:11434/api/embeddings"  # Ollama API endpoint for embeddings
           
           # Use the same model as in the llama.py file for consistency
-          model_name = "phi"  # This should match the model in llama.py
+          model_name = "llama3:70b"  # Updated to Llama 3.1
+          
+          # Handle empty input to prevent API errors
+          if not prompt or not isinstance(prompt, str) or prompt.strip() == "":
+              logger.warning("Empty or invalid prompt received. Returning empty embedding.")
+              return []
           
           payload = {"model": model_name, "prompt": prompt, "stream": False}
           
@@ -1487,7 +1541,12 @@ Repository Structure and Code:
                   embeddings = json_response.get("embedding", [])
                   if embeddings and isinstance(embeddings, list):
                       logger.info(f"Successfully generated embedding with {len(embeddings)} dimensions using {model_name}")
-                  return embeddings
+                      return embeddings
+                  else:
+                      logger.error("Invalid embedding format received from API")
+                      retries += 1
+                      if retries >= max_retries:
+                          return []  # Return empty list on failure
       
               except requests.exceptions.RequestException as e:
                   logger.error(f"Error calling Ollama API (attempt {retries+1}/{max_retries}): {e}")
@@ -1495,19 +1554,25 @@ Repository Structure and Code:
                   if retries < max_retries:
                       # Exponential backoff
                       time.sleep(2 ** retries)
-                      continue
-                  return f"An error occurred while generating the embeddings: {str(e)}"
+                  else:
+                      logger.error(f"All retries failed: {e}")
+                      return []  # Return empty list after all retries fail
       
               except json.JSONDecodeError as e:
                   logger.error(f"JSON decoding error: {e}")
-                  return f"An error occurred while processing the embeddings response: {str(e)}"
+                  retries += 1
+                  if retries >= max_retries:
+                      return []  # Return empty list on failure
+          
+          # Fallback return if all else fails
+          return []
       
       class MyEmbeddingFunction(EmbeddingFunction):
           """
           A custom embedding function that uses the Ollama model to generate embeddings for input documents.
           """
           
-          def __init__(self, model_name: str = "phi", timeout: int = 60):
+          def __init__(self, model_name: str = "llama3:70b", timeout: int = 60):
               """
               Initialize the embedding function with a model name and timeout.
               
@@ -1594,61 +1659,6 @@ Repository Structure and Code:
                       all_embeddings.append([0.0] * self.embedding_dim)
               
               return all_embeddings      [Code End]
-    - query.py
-      [Code Start]
-      import logging
-      
-      logger = logging.getLogger(__name__)
-      
-      def query_documents(collection, question: str, n_results: int = 4) -> list:
-          """
-          Query the ChromaDB collection for documents relevant to the given question.
-      
-          Args:
-              collection: The ChromaDB collection to query
-              question (str): The input question or query text.
-              n_results (int, optional): The number of relevant documents to retrieve. Default is 4.
-      
-          Returns:
-              list: A list of relevant document chunks.
-          """
-          logger.info(f"Querying for relevant documents to the question: '{question}' (Top {n_results} results)")
-      
-          try:
-              # Query the collection
-              results = collection.query(
-                  query_texts=question, 
-                  n_results=n_results,
-                  include=["documents", "distances", "metadatas"]
-              )
-              
-              # Extract relevant document chunks with their IDs and distances
-              relevant_chunks = []
-              
-              if results and "documents" in results and len(results["documents"]) > 0:
-                  # Flatten the list of documents
-                  for i, docs in enumerate(results["documents"]):
-                      for j, doc in enumerate(docs):
-                          # Get the document ID and distance if available
-                          doc_id = results.get("ids", [[]])[i][j] if "ids" in results else f"doc_{i}_{j}"
-                          distance = results.get("distances", [[]])[i][j] if "distances" in results else None
-                          
-                          # Add the document to the list of relevant chunks
-                          relevant_chunks.append(doc)
-                          
-                          # Log document details
-                          doc_preview = doc[:50] + "..." if len(doc) > 50 else doc
-                          if distance:
-                              logger.info(f"Document {doc_id} (relevance: {1-distance:.4f}): {doc_preview}")
-                          else:
-                              logger.info(f"Document {doc_id}: {doc_preview}")
-              
-              logger.info(f"Found {len(relevant_chunks)} relevant document chunks")
-              return relevant_chunks
-              
-          except Exception as e:
-              logger.error(f"Error querying documents: {e}")
-              return []      [Code End]
     - web_scrape.py
       [Code Start]
       import requests
@@ -1788,22 +1798,308 @@ Repository Structure and Code:
               return combined
           else:
               return "Unable to retrieve relevant information from the web for this query."      [Code End]
-  [.git]
-    [branches]
-    [objects]
-      [pack]
-      [info]
-    [info]
-    [hooks]
-    [refs]
-      [heads]
-      [remotes]
-        [origin]
-      [tags]
-    [logs]
-      [refs]
-        [heads]
-        [remotes]
-          [origin]
-  [chroma_db]
-    [77c4e579-a024-472c-a2f0-ceae13dff6a8]
+    - generate.py
+      [Code Start]
+      from core.llama import ollama_chat, ollama_generate
+      import logging
+      import re
+      
+      logger = logging.getLogger(__name__)
+      
+      def clean_chunk_text(text):
+          """
+          Clean up text chunks to improve readability for the LLM.
+          This helps the model better understand the content.
+          """
+          # Remove excessive whitespace (including between characters)
+          text = re.sub(r'\s+', ' ', text)
+          
+          # Fix common OCR errors with dollar amounts
+          # This regex looks for patterns that might be dollar amounts with spaces
+          text = re.sub(r'\$\s*(\d+)\s*\.\s*(\d+)', r'$\1.\2', text)
+          
+          # Fix common receipt formatting issues
+          text = text.replace('S G G S T', 'SG GST')  # Common receipt header issues
+          text = text.replace('G S T', 'GST')  # Tax formatting
+          
+          # Remove any lone characters that might be OCR errors (single character surrounded by spaces)
+          text = re.sub(r'\s[bcdefghijklmnopqrstuvwxyz]\s', ' ', text, flags=re.IGNORECASE)
+          
+          return text.strip()
+      
+      def detect_task(conversation: str, query: str) -> str:
+          """Detect the type of task from the conversation and query."""
+          # Limit conversation size to avoid timeout
+          if len(conversation) > 1000:
+              conversation = conversation[-1000:]
+          
+          prompt = (
+              "You are an AI assistant tasked with analyzing the following conversation between a user and an assistant. "
+              "Your goal is to determine if the user is asking for a SUMMARIZATION of a document or asking a QUESTION FROM DOCUMENTS. "
+              "Choose one of these two categories that best describes the user's request: "
+              "'SUMMARIZATION' or 'QUESTION FROM DOCUMENTS'."
+              "\n\nHere is the conversation:\n\n" + conversation + "\n\n"
+              "User's final message: " + query + "\n\n"
+              "Respond only with the category name: either 'SUMMARIZATION' or 'QUESTION FROM DOCUMENTS'."
+          )
+      
+          category = ollama_generate(prompt)
+          logger.info(f"Detected task category: {category}")
+          return category
+      
+      def generate_SUMMARIZATION(query: str, relevant_chunks: list, history: list) -> str:
+          """Generate a summary based on relevant document chunks."""
+          # Clean each chunk first
+          cleaned_chunks = [clean_chunk_text(chunk) for chunk in relevant_chunks]
+          
+          # Combine relevant chunks into a single context (limit size)
+          context = "\n\n".join(cleaned_chunks)
+          if len(context) > 1500:
+              context = context[:1500] + "... [content truncated]"
+      
+          # Enhanced prompt for summarization with anti-hallucination instructions
+          prompt = (
+              "You are a precise document summarization assistant. The user has a document that may have extraction artifacts "
+              "like extra spaces between characters, especially in numbers (for example '$ 1 0 . 9 0' should be read as '$10.90'). "
+              "Your task is to summarize ONLY the information provided in the document chunks below. "
+              "Do NOT include any information that is not explicitly present in the document chunks. "
+              "If the document chunks do not contain information related to the user's request, state this clearly. "
+              "Never make up or infer information that isn't directly stated in the documents."
+              "\n\nUser's request: " + query + 
+              "\n\nDocument content to summarize (ONLY use this information):\n" + context + 
+              "\n\nSummary (based STRICTLY on the provided document content):"
+          )
+      
+          # Limit history size
+          history = history[-3:] if len(history) > 3 else history.copy()
+          history.append({"role": "user", "content": prompt})
+      
+          # Generate response using the Ollama model
+          response = ollama_chat(history)
+          return response
+      
+      def generate_QUESTIONFROMDOC(query: str, relevant_chunks: list, history: list) -> str:
+          """Answer a question based on document context with enhanced instructions for handling poorly formatted text."""
+          # Clean each chunk
+          cleaned_chunks = [clean_chunk_text(chunk) for chunk in relevant_chunks]
+          
+          # Combine relevant chunks into a single context (limit size)
+          context = "\n\n".join(cleaned_chunks)
+          if len(context) > 1500:
+              context = context[:1500] + "... [content truncated]"
+      
+          # Enhanced prompt for document Q&A with instructions for handling PDF artifacts
+          prompt = (
+              "You are a precise document question-answering assistant. The user has a question about information "
+              "in a PDF document. The text from this PDF may have extraction artifacts like extra spaces between characters "
+              "or unusual formatting. Your task is to answer the user's question using ONLY the information "
+              "provided in the document chunks below. Follow these rules: "
+              
+              "1. If the text contains oddly spaced characters like '$ 1 0 . 9 0', interpret this as the properly formatted value '$10.90'. "
+              "2. Fix any obvious formatting issues when interpreting the content. "
+              "3. If the answer is not contained in the documents, explicitly state: 'I cannot find this information in the provided documents.' "
+              "4. NEVER make up information not found in these documents. "
+              "5. Be concise and direct in your answer. "
+              "6. You do not need to tell information can be found in which document chunks. "
+              
+              "\n\nQuestion: " + query + 
+              "\n\nDocument content (this may contain PDF extraction artifacts like extra spaces between characters):\n" + context + 
+              "\n\nAnswer (interpret any formatting issues and answer based STRICTLY on the provided content):"
+          )
+      
+          # Limit history size
+          history = history[-3:] if len(history) > 3 else history.copy()
+          history.append({"role": "user", "content": prompt})
+      
+          # Generate response using the Ollama model
+          response = ollama_chat(history)
+          return response      [Code End]
+    - llama.py
+      [Code Start]
+      import requests
+      import json
+      import logging
+      import time
+      from typing import List, Dict, Any, Union
+      
+      # Set up logging
+      logging.basicConfig(level=logging.INFO)
+      logger = logging.getLogger(__name__)
+      
+      def ollama_chat(chat_history: str, model_name: str = "llama3:70b", max_retries: int = 2, timeout: int = 120) -> str:
+          """
+          Call the Ollama model to generate a response for the given prompt with retry logic.
+      
+          Args:
+              chat_history: The history of chat between user and assistant.
+              model_name: The name of the Ollama model to use.
+              max_retries: Maximum number of retry attempts.
+              timeout: Timeout for the API call in seconds.
+      
+          Returns:
+              str: The generated response from the model, or an error message if an issue occurs.
+          """
+          url = "http://localhost:11434/api/chat"  # Ollama API endpoint for chat
+          
+          # Ensure chat history isn't too long
+          if isinstance(chat_history, list) and len(chat_history) > 10:
+              chat_history = chat_history[-10:]  # Keep only the last 10 messages
+          
+          payload = {"model": model_name, "messages": chat_history, "stream": False}
+          
+          # Add some model parameters to potentially speed up response
+          payload["options"] = {
+              "temperature": 0.1,       # Reduced from 0.7 to 0.1 for more deterministic outputs
+              "top_p": 0.5,             # Reduced from 0.9 to 0.5 to restrict token sampling
+              "num_predict": 512,       # Increased to allow for complete answers
+              "top_k": 10,              # Added to restrict to only the most likely tokens
+              "repeat_penalty": 1.2     # Added to discourage repetition which can indicate confabulation
+          }
+      
+          retries = 0
+          while retries <= max_retries:
+              try:
+                  logger.info(f"Sending chat request to Ollama with model: {model_name} (attempt {retries+1}/{max_retries+1})")
+                  # Send POST request
+                  response = requests.post(url, json=payload, timeout=timeout)
+                  response.raise_for_status()  # Raise an error for bad responses
+      
+                  # Parse the JSON response
+                  json_response = response.json()
+      
+                  # Extract the generated message content
+                  generated_text = json_response.get("message", {}).get(
+                      "content", "I couldn't understand. Could you explain more?"
+                  )
+                  return generated_text
+      
+              except requests.exceptions.Timeout:
+                  logger.warning(f"Timeout error on attempt {retries+1}/{max_retries+1}. Retrying...")
+                  retries += 1
+                  # If this was the last retry, give up
+                  if retries > max_retries:
+                      return "I'm sorry, but I'm having trouble generating a response at the moment due to system load. Please try again with a simpler question or try again later."
+                  # Wait before retrying
+                  time.sleep(2)
+                  
+              except requests.exceptions.RequestException as e:
+                  logger.error(f"Error calling Ollama API: {e}")
+                  retries += 1
+                  if retries > max_retries:
+                      return f"An error occurred while generating the response: {str(e)}"
+                  time.sleep(2)
+      
+              except json.JSONDecodeError as e:
+                  logger.error(f"JSON decoding error: {e}")
+                  return f"An error occurred while processing the response: {str(e)}"
+      
+      def ollama_generate(prompt: str, model_name: str = "llama3:70b", timeout: int = 60) -> str:
+          """
+          Call the Ollama model to generate a response for the given prompt.
+      
+          Args:
+              prompt (str): The input prompt from the user.
+              model_name: The name of the Ollama model to use.
+              timeout: Timeout for the API call in seconds.
+      
+          Returns:
+              str: The generated response from the model, or an error message if an issue occurs.
+          """
+          url = "http://localhost:11434/api/generate"  # Ollama API endpoint for generate
+          
+          # Limit prompt size if it's very large
+          if len(prompt) > 4000:
+              prompt = prompt[:4000]
+              
+          payload = {
+              "model": model_name, 
+              "prompt": prompt, 
+              "stream": False,
+              "options": {
+                  "temperature": 0.1,       # Reduced from 0.7 to match chat parameters
+                  "top_p": 0.5,             # Reduced to match chat parameters
+                  "top_k": 10,              # Added to restrict token selection
+                  "num_predict": 64,        # Task detection doesn't need many tokens
+                  "repeat_penalty": 1.2     # Added to discourage repetition
+              }
+          }
+      
+          try:
+              logger.info(f"Sending generate request to Ollama with model: {model_name}")
+              # Send POST request
+              response = requests.post(url, json=payload, timeout=timeout)
+              response.raise_for_status()  # Raise an error for bad responses
+      
+              # Parse the JSON response
+              json_response = response.json()
+      
+              # Extract the generated message content
+              generated_text = json_response.get("response", "")
+              return generated_text
+      
+          except requests.exceptions.Timeout:
+              logger.error(f"Timeout error when calling Ollama generate API")
+              return "QUESTION FROM DOCUMENTS"  # Default to question answering on timeout
+      
+          except requests.exceptions.RequestException as e:
+              logger.error(f"Error calling Ollama API: {e}")
+              return "QUESTION FROM DOCUMENTS"  # Default to question answering on error
+      
+          except json.JSONDecodeError as e:
+              logger.error(f"JSON decoding error: {e}")
+              return "QUESTION FROM DOCUMENTS"  # Default to question answering on parse error      [Code End]
+    - query.py
+      [Code Start]
+      import logging
+      
+      logger = logging.getLogger(__name__)
+      
+      def query_documents(collection, question: str, n_results: int = 4) -> list:
+          """
+          Query the ChromaDB collection for documents relevant to the given question.
+      
+          Args:
+              collection: The ChromaDB collection to query
+              question (str): The input question or query text.
+              n_results (int, optional): The number of relevant documents to retrieve. Default is 4.
+      
+          Returns:
+              list: A list of relevant document chunks.
+          """
+          logger.info(f"Querying for relevant documents to the question: '{question}' (Top {n_results} results)")
+      
+          try:
+              # Query the collection
+              results = collection.query(
+                  query_texts=question, 
+                  n_results=n_results,
+                  include=["documents", "distances", "metadatas"]
+              )
+              
+              # Extract relevant document chunks with their IDs and distances
+              relevant_chunks = []
+              
+              if results and "documents" in results and len(results["documents"]) > 0:
+                  # Flatten the list of documents
+                  for i, docs in enumerate(results["documents"]):
+                      for j, doc in enumerate(docs):
+                          # Get the document ID and distance if available
+                          doc_id = results.get("ids", [[]])[i][j] if "ids" in results else f"doc_{i}_{j}"
+                          distance = results.get("distances", [[]])[i][j] if "distances" in results else None
+                          
+                          # Add the document to the list of relevant chunks
+                          relevant_chunks.append(doc)
+                          
+                          # Log document details
+                          doc_preview = doc[:50] + "..." if len(doc) > 50 else doc
+                          if distance:
+                              logger.info(f"Document {doc_id} (relevance: {1-distance:.4f}): {doc_preview}")
+                          else:
+                              logger.info(f"Document {doc_id}: {doc_preview}")
+              
+              logger.info(f"Found {len(relevant_chunks)} relevant document chunks")
+              return relevant_chunks
+              
+          except Exception as e:
+              logger.error(f"Error querying documents: {e}")
+              return []      [Code End]
