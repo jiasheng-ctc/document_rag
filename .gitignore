@@ -1,57 +1,39 @@
-# Python cache files
+# Python specific
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 
-# Virtual environment
+# Virtual environments
 venv/
 env/
 .env/
 
-# VSCode settings
+# IDE specific
 .vscode/
-
-# macOS system files
-.DS_Store
-
-# Compiled python files
-*.pyc
-
-# Log files
-*.log
-
-# Local development settings
-*.local
-
-# IDE-specific files
 .idea/
 *.sublime-project
 *.sublime-workspace
 
 # Temporary files
 *.tmp
+*.log
 *~
+.DS_Store
 
-# Development database
+# Specific project directories
 chroma_db/
-chroma_db_setup/
-
-# Screenshot and image files
-*.png
-screenshot.png
-
-# Dependencies and build files
-public/
 core/
+public/
 scripts/
+
+# Development files
+debug_connection.py
+chromdb_setup.py
+
+# Dependency files
 requirements.txt
 
-# GitHub-specific
-.github/
-
-# Miscellaneous
-debug_connect/
-find_all_scripts.py
-LICENSE
-README.md
-repo_structure.txt
+# Misc
+.github/workflows/
+screenshot.png
