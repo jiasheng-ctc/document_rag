@@ -1,123 +1,114 @@
-from core.web_scrape import scrape_web
 from core.llama import ollama_chat, ollama_generate
+import logging
+import re
 
+logger = logging.getLogger(__name__)
+
+def clean_chunk_text(text):
+    """
+    Clean up text chunks to improve readability for the LLM.
+    This helps the model better understand the content.
+    """
+    # Remove excessive whitespace (including between characters)
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Fix common OCR errors with dollar amounts
+    # This regex looks for patterns that might be dollar amounts with spaces
+    text = re.sub(r'\$\s*(\d+)\s*\.\s*(\d+)', r'$\1.\2', text)
+    
+    # Fix common receipt formatting issues
+    text = text.replace('S G G S T', 'SG GST')  # Common receipt header issues
+    text = text.replace('G S T', 'GST')  # Tax formatting
+    
+    # Remove any lone characters that might be OCR errors (single character surrounded by spaces)
+    text = re.sub(r'\s[bcdefghijklmnopqrstuvwxyz]\s', ' ', text, flags=re.IGNORECASE)
+    
+    return text.strip()
 
 def detect_task(conversation: str, query: str) -> str:
+    """Detect the type of task from the conversation and query."""
+    # Limit conversation size to avoid timeout
+    if len(conversation) > 1000:
+        conversation = conversation[-1000:]
+    
     prompt = (
         "You are an AI assistant tasked with analyzing the following conversation between a user and an assistant. "
-        "Your goal is to determine the specific task the user is requesting, particularly focusing on the user's final message, "
-        "as the user may shift the conversation and request something entirely new. "
-        "Carefully analyze the final message to determine the nature of the task being requested."
-        "\n\nChoose one of the following categories that best describes the user's final request: "
-        "'GENERAL QUESTION', 'SUMMARIZATION', 'QUESTION FROM DOCUMENTS', 'CHIT CHAT', or 'OTHER'."
-        "\n\nHere is the entire conversation:\n\n" + conversation + "\n\n"
+        "Your goal is to determine if the user is asking for a SUMMARIZATION of a document or asking a QUESTION FROM DOCUMENTS. "
+        "Choose one of these two categories that best describes the user's request: "
+        "'SUMMARIZATION' or 'QUESTION FROM DOCUMENTS'."
+        "\n\nHere is the conversation:\n\n" + conversation + "\n\n"
         "User's final message: " + query + "\n\n"
-        "Respond only with the category that most accurately matches the user's final request."
+        "Respond only with the category name: either 'SUMMARIZATION' or 'QUESTION FROM DOCUMENTS'."
     )
 
     category = ollama_generate(prompt)
+    logger.info(f"Detected task category: {category}")
     return category
 
+def generate_SUMMARIZATION(query: str, relevant_chunks: list, history: list) -> str:
+    """Generate a summary based on relevant document chunks."""
+    # Clean each chunk first
+    cleaned_chunks = [clean_chunk_text(chunk) for chunk in relevant_chunks]
+    
+    # Combine relevant chunks into a single context (limit size)
+    context = "\n\n".join(cleaned_chunks)
+    if len(context) > 1500:
+        context = context[:1500] + "... [content truncated]"
 
-def generate_GENERALQUESTION(query: str, history: list) -> str:
-    # Scrape the web for relevant information
-    web_result = scrape_web(query)
-
-    # Construct a precise prompt
+    # Enhanced prompt for summarization with anti-hallucination instructions
     prompt = (
-        "You are an expert assistant answering questions based on web search results. "
-        "Use only relevant information from the web search to answer the user's query. "
-        "Ignore any irrelevant details, and provide a concise response in up to three sentences if the query doesn't specify otherwise."
-        "Don't mention anything about the resources when you got your respond"
-        "\n\nQuestion: " + query + "\n\nWeb Result:\n" + web_result + "\n\nAnswer:"
+        "You are a precise document summarization assistant. The user has a document that may have extraction artifacts "
+        "like extra spaces between characters, especially in numbers (for example '$ 1 0 . 9 0' should be read as '$10.90'). "
+        "Your task is to summarize ONLY the information provided in the document chunks below. "
+        "Do NOT include any information that is not explicitly present in the document chunks. "
+        "If the document chunks do not contain information related to the user's request, state this clearly. "
+        "Never make up or infer information that isn't directly stated in the documents."
+        "\n\nUser's request: " + query + 
+        "\n\nDocument content to summarize (ONLY use this information):\n" + context + 
+        "\n\nSummary (based STRICTLY on the provided document content):"
     )
-    history = history.copy()
+
+    # Limit history size
+    history = history[-3:] if len(history) > 3 else history.copy()
     history.append({"role": "user", "content": prompt})
 
     # Generate response using the Ollama model
     response = ollama_chat(history)
     return response
 
+def generate_QUESTIONFROMDOC(query: str, relevant_chunks: list, history: list) -> str:
+    """Answer a question based on document context with enhanced instructions for handling poorly formatted text."""
+    # Clean each chunk
+    cleaned_chunks = [clean_chunk_text(chunk) for chunk in relevant_chunks]
+    
+    # Combine relevant chunks into a single context (limit size)
+    context = "\n\n".join(cleaned_chunks)
+    if len(context) > 1500:
+        context = context[:1500] + "... [content truncated]"
 
-def generate_SUMMARIZATION(query: str, relevant_chunks: str, history: list) -> str:
-    # Combine relevant chunks into a single context
-    context = "\n\n".join(relevant_chunks)
-
-    # Refined prompt for summarization
+    # Enhanced prompt for document Q&A with instructions for handling PDF artifacts
     prompt = (
-        "You are an AI assistant tasked with summarizing information. "
-        "If the user's query provides context, summarize based on the query. "
-        "If the query lacks context, use the provided relevant chunks to generate the summary."
-        "Don't mention anything about the resources when you got your respond"
-        "\n\nQuery: " + query + "\n\nRelevant Chunks:\n" + context + "\n\nSummary:"
+        "You are a precise document question-answering assistant. The user has a question about information "
+        "in a PDF document. The text from this PDF may have extraction artifacts like extra spaces between characters "
+        "or unusual formatting. Your task is to answer the user's question using ONLY the information "
+        "provided in the document chunks below. Follow these rules: "
+        
+        "1. If the text contains oddly spaced characters like '$ 1 0 . 9 0', interpret this as the properly formatted value '$10.90'. "
+        "2. Fix any obvious formatting issues when interpreting the content. "
+        "3. If the answer is not contained in the documents, explicitly state: 'I cannot find this information in the provided documents.' "
+        "4. NEVER make up information not found in these documents. "
+        "5. Be concise and direct in your answer. "
+        "6. You do not need to tell information can be found in which document chunks. "
+        
+        "\n\nQuestion: " + query + 
+        "\n\nDocument content (this may contain PDF extraction artifacts like extra spaces between characters):\n" + context + 
+        "\n\nAnswer (interpret any formatting issues and answer based STRICTLY on the provided content):"
     )
 
-    history = history.copy()
+    # Limit history size
+    history = history[-3:] if len(history) > 3 else history.copy()
     history.append({"role": "user", "content": prompt})
 
     # Generate response using the Ollama model
-    response = ollama_chat(history)
-    return response
-
-
-def generate_QUESTIONFROMDOC(query: str, relevant_chunks: str, history: list) -> str:
-    # Combine relevant chunks into a single context
-    context = "\n\n".join(relevant_chunks)
-
-    # Refined prompt to ensure focus on document context
-    prompt = (
-        "You are an AI assistant answering questions based on provided document context. "
-        "Only use the relevant information from the document to answer the user's query. "
-        "Ignore any irrelevant details, and provide a concise response in up to three sentences."
-        "Don't mention anything about the resources when you got your respond"
-        "\n\nQuestion: " + query + "\n\nRelevant Context:\n" + context + "\n\nAnswer:"
-    )
-
-    history = history.copy()
-    history.append({"role": "user", "content": prompt})
-
-    # Generate response using the Ollama model
-    response = ollama_chat(history)
-    return response
-
-
-def generate_CHITCHAT(query: str, history: list) -> str:
-    # Use the user query directly for chit-chat
-    prompt = query
-
-    history = history.copy()
-    history.append({"role": "user", "content": prompt})
-
-    # Generate chit-chat response using the Ollama model
-    response = ollama_chat(history)
-    return response
-
-
-def generate_response(question: str, relevant_chunks: list, history: list) -> str:
-    # Combine relevant chunks into a single context
-    context = "\n\n".join(relevant_chunks)
-
-    # Scrape the web for additional relevant information
-    web_result = scrape_web(question)
-
-    # Refined prompt to combine both sources effectively
-    prompt = (
-        "You are an AI assistant designed for question-answering tasks. "
-        "Use both the provided context from documents and the web search results to answer the user's query. "
-        "If any part of the context or web result seems irrelevant to the question, ignore it."
-        "Don't mention anything about the resources when you got your respond"
-        "\n\nDocument Context:\n"
-        + context
-        + "\n\nWeb Result:\n"
-        + web_result
-        + "\n\nQuestion:\n"
-        + question
-        + "\n\nAnswer (in three concise sentences):"
-    )
-
-    history = history.copy()
-    history.append({"role": "user", "content": prompt})
-
-    # Generate the response using the Ollama model
     response = ollama_chat(history)
     return response
