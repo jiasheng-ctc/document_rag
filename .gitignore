@@ -23,16 +23,10 @@ env/
 
 # Specific project directories
 chroma_db/
-core/
-public/
-scripts/
 
 # Development files
 debug_connection.py
 chromdb_setup.py
-
-# Dependency files
-requirements.txt
 
 # Misc
 .github/workflows/
