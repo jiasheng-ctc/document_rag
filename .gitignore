@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.pyc
+.github/workflows/
+.vscode/
+__pycache__/
 
 # Virtual environments
 venv/
